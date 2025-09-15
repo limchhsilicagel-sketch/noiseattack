@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>소음 경고</title>
+  <style>
+    :root {
+      --ok: #0a7d0a;
+      --alert: #c91919;
+      --panel-bg: rgba(0,0,0,0.55);
+      --text: #ffffff;
+      --accent: #ffd166;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR", Helvetica, Arial, sans-serif; }
+    body { background: var(--ok); color: var(--text); transition: background 140ms linear; }
+
+    .app { position: relative; height: 100%; display: grid; place-items: center; }
+
+    .center {
+      text-align: center;
+      user-select: none;
+    }
+
+    .db { font-size: clamp(28px, 8vw, 96px); font-weight: 800; letter-spacing: -0.02em; }
+    .state { font-size: clamp(18px, 4.5vw, 48px); opacity: 0.95; margin-top: 0.2em; }
+
+    .controls {
+      position: fixed; inset: 14px auto auto 14px; max-width: min(92vw, 520px);
+      background: var(--panel-bg); backdrop-filter: blur(6px);
+      border-radius: 16px; padding: 14px 16px; border: 1px solid rgba(255,255,255,0.15);
+    }
+    .controls h2 { margin: 0 0 8px; font-size: 16px; font-weight: 700; letter-spacing: 0.01em; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; margin: 8px 0; }
+    .row label { font-size: 14px; opacity: 0.95; }
+    .row output { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+    input[type="range"] { width: 100%; }
+
+    button, .btn {
+      appearance: none; border: none; cursor: pointer; color: #111; background: var(--accent);
+      padding: 10px 14px; border-radius: 12px; font-weight: 700; box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .start {
+      display: grid; place-items: center; gap: 16px; text-align: center;
+      background: var(--panel-bg); padding: 24px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.15);
+    }
+    .help { max-width: 680px; line-height: 1.5; opacity: 0.95; font-size: 14px; }
+
+    .hidden { display: none !important; }
+
+    /* Alert mode */
+    body.alert { background: var(--alert); }
+
+    .meter { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.18); overflow: hidden; }
+    .meter > span { display: block; height: 100%; width: 0%; background: #fff; opacity: 0.9; }
+
+    .err { position: fixed; right: 14px; bottom: 14px; background: var(--panel-bg); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; padding: 12px 14px; max-width: min(92vw, 520px); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="start" id="startPanel">
+      <div class="help">
+        <h1 style="margin:0 0 6px; font-size: 22px;">소음 경고 웹앱</h1>
+        <p style="margin:0 0 12px;">노트북 마이크로 들어오는 소리의 음압 레벨이 임계값을 넘으면 화면이 <b>빨간색</b>으로 변하고 “<b>시끄러 시끄러</b>” 음성이 재생됨.</p>
+        <ul style="margin:0 0 14px 18px; padding:0;">
+          <li>처음 시작 시 브라우저에서 마이크 권한을 허용해야 함.</li>
+          <li>측정값은 <b>dBFS(상대 데시벨)</b>로, 실제 dB(SPL)가 아니라 기기·환경에 따라 값이 다를 수 있음.</li>
+        </ul>
+      </div>
+      <button id="startBtn" class="btn">마이크 시작</button>
+    </div>
+
+    <div class="center" id="hud" class="hidden" aria-live="polite">
+      <div class="db"><span id="dbNow">—</span> dBFS</div>
+      <div class="state" id="stateLabel">대기 중…</div>
+      <div class="meter" aria-hidden="true" style="margin-top:12px; width:min(80vw,560px)"><span id="meterBar"></span></div>
+    </div>
+
+    <section class="controls hidden" id="controls">
+      <h2>설정</h2>
+      <div class="row">
+        <label>임계값 <small>(dBFS)</small></label>
+        <output id="thresOut">-25</output>
+      </div>
+      <input id="thres" type="range" min="-60" max="-10" step="1" value="-25" />
+
+      <div class="row">
+        <label>알림 쿨다운 <small>(초)</small></label>
+        <output id="coolOut">2.0</output>
+      </div>
+      <input id="cool" type="range" min="0.5" max="5" step="0.5" value="2" />
+
+      <div class="row">
+        <label>환경 맞춤 임계값 캘리브레이션</label>
+        <button id="calibBtn">현재값+3dB로 설정</button>
+      </div>
+
+      <div class="row">
+        <label>음성 재생</label>
+        <button id="testSay">테스트 재생</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="err hidden" id="err"></div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const startPanel = document.getElementById('startPanel');
+    const hud = document.getElementById('hud');
+    const controls = document.getElementById('controls');
+    const dbNow = document.getElementById('dbNow');
+    const stateLabel = document.getElementById('stateLabel');
+    const thres = document.getElementById('thres');
+    const thresOut = document.getElementById('thresOut');
+    const cool = document.getElementById('cool');
+    const coolOut = document.getElementById('coolOut');
+    const calibBtn = document.getElementById('calibBtn');
+    const meterBar = document.getElementById('meterBar');
+    const testSay = document.getElementById('testSay');
+    const errBox = document.getElementById('err');
+
+    let audioCtx, analyser, micSource;
+    let dataBuf;
+    let animId = null;
+    let lastDb = -100;
+    let lastAlertAt = 0;
+
+    function setErr(msg) {
+      errBox.textContent = msg;
+      errBox.classList.remove('hidden');
+    }
+
+    function clearErr() { errBox.classList.add('hidden'); errBox.textContent = ''; }
+
+    function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+
+    function rmsDb(buf) {
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) { const v = buf[i]; sum += v*v; }
+      const rms = Math.sqrt(sum / buf.length) || 1e-12; // avoid log(0)
+      let db = 20 * Math.log10(rms);
+      if (!Number.isFinite(db)) db = -100;
+      return clamp(db, -100, 0);
+    }
+
+    function smooth(newVal, prevVal, alpha = 0.25) { // 0..1, higher = faster
+      return prevVal + alpha * (newVal - prevVal);
+    }
+
+    function say(text) {
+      if ('speechSynthesis' in window) {
+        try {
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = 'ko-KR';
+          u.rate = 1.0;
+          u.pitch = 1.0;
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+          return;
+        } catch (e) { /* fall through */ }
+      }
+      // Beep fallback if TTS unavailable
+      if (audioCtx && audioCtx.state === 'running') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 900;
+        gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.35);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.36);
+      }
+    }
+
+    async function start() {
+      clearErr();
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        micSource = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.0; // we do our own smoothing
+        micSource.connect(analyser);
+        dataBuf = new Float32Array(analyser.fftSize);
+
+        await audioCtx.resume();
+
+        startPanel.classList.add('hidden');
+        hud.classList.remove('hidden');
+        controls.classList.remove('hidden');
+        loop();
+      } catch (e) {
+        console.error(e);
+        setErr('마이크 접근에 실패했습니다. 브라우저 권한을 확인하세요. (' + (e && e.message ? e.message : e) + ')');
+      }
+    }
+
+    function loop() {
+      analyser.getFloatTimeDomainData(dataBuf);
+      const rawDb = rmsDb(dataBuf);
+      lastDb = smooth(rawDb, lastDb, 0.2);
+
+      const t = parseFloat(thres.value);
+      const cd = parseFloat(cool.value);
+
+      dbNow.textContent = lastDb.toFixed(1);
+      const pct = clamp(((lastDb - (-60)) / (0 - (-60))) * 100, 0, 100);
+      meterBar.style.width = pct + '%';
+
+      if (lastDb >= t) {
+        document.body.classList.add('alert');
+        stateLabel.textContent = '시끄러! (임계 초과)';
+        const now = performance.now();
+        if (now - lastAlertAt > cd * 1000) {
+          say('시끄러 시끄러');
+          lastAlertAt = now;
+        }
+      } else {
+        document.body.classList.remove('alert');
+        stateLabel.textContent = '조용~';
+      }
+
+      animId = requestAnimationFrame(loop);
+    }
+
+    // UI wiring
+    startBtn.addEventListener('click', start);
+
+    thres.addEventListener('input', () => { thresOut.textContent = thres.value; });
+    thresOut.textContent = thres.value;
+
+    cool.addEventListener('input', () => { coolOut.textContent = cool.value; });
+    coolOut.textContent = cool.value;
+
+    calibBtn.addEventListener('click', () => {
+      const target = clamp(lastDb + 3, -60, -10);
+      thres.value = String(Math.round(target));
+      thresOut.textContent = thres.value;
+    });
+
+    testSay.addEventListener('click', () => say('시끄러 시끄러'));
+
+    // Nice: pause/resume on visibility change (saves battery)
+    document.addEventListener('visibilitychange', async () => {
+      if (!audioCtx) return;
+      if (document.hidden) {
+        if (audioCtx.state === 'running') await audioCtx.suspend();
+      } else {
+        if (audioCtx.state !== 'running') await audioCtx.resume();
+      }
+    });
+
+    // Basic support checks
+    if (!('mediaDevices' in navigator) || !('getUserMedia' in navigator.mediaDevices)) {
+      setErr('이 브라우저는 마이크 입력을 지원하지 않습니다. 최신 Chrome/Edge/Firefox를 사용하세요.');
+      startBtn.disabled = true;
+    }
+  </script>
+</body>
+</html>
